@@ -1,6 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main where
-import Control.Monad (void, filterM)
+import Control.Monad (void)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Config
 import Graphics.Vty.CrossPlatform
@@ -21,14 +21,12 @@ import Control.Exception (catch, SomeException)
 
 import qualified Brick.Types as T
 import qualified Brick.Main as M
-import qualified Brick.Widgets.Center as C
 import qualified Brick.Widgets.Border as B
 import qualified Brick.Widgets.Edit as E
-import qualified Brick.Focus as F
 import Brick.BChan
-import Brick.Types(Widget, ViewportType(Horizontal, Vertical, Both))
+import Brick.Types(ViewportType(Vertical))
 import Brick.AttrMap (attrMap)
-import Brick.Widgets.Core (hLimit, vLimit, hBox, vBox, viewport, str, fill, strWrapWith, strWrap)
+import Brick.Widgets.Core (vLimit, vBox, viewport, str, strWrapWith)
 
 -- Brick functions and data
 
@@ -79,7 +77,11 @@ appEvent (T.VtyEvent (V.EvKey V.KEnter [])) = do
 appEvent (T.AppEvent (MRE msg)) = do
   addChatLine msg
   M.vScrollToEnd vp
-appEvent (T.VtyEvent (V.EvKey V.KEsc [])) = M.halt
+appEvent (T.VtyEvent (V.EvKey V.KEsc [])) = do
+  h <- use handle
+  name <- use username
+  liftIO $ hPutStrLn h (name ++ " disconnected.")
+  M.halt
 appEvent (T.VtyEvent (V.EvKey V.KDown  [V.MCtrl])) = M.vScrollBy vp 1
 appEvent (T.VtyEvent (V.EvKey V.KUp  [V.MCtrl])) = M.vScrollBy vp (-1)
 appEvent ev = do
@@ -107,6 +109,7 @@ app =
 
 -- User input functions
 
+strip :: [Char] -> [Char]
 strip = filter (not . isSpace)
 
 stripLeadingSpaces :: String -> String
@@ -196,10 +199,12 @@ client name = do
   let initialState = buildState name handle
   -- create a thread for comunicating with the server
   eventChannel <- Brick.BChan.newBChan 5
+  Brick.BChan.writeBChan eventChannel $ MRE $ "Use ':con' to see current connections."
   forkIO $ clientConnection eventChannel handle
   -- start the client interface
   let buildVty = Graphics.Vty.CrossPlatform.mkVty Graphics.Vty.Config.defaultConfig
   initialVty <- buildVty
+  hPutStrLn handle $ name ++ " joined."
   void $ M.customMain initialVty buildVty (Just eventChannel) app initialState
 
 clientConnection :: Brick.BChan.BChan MessageRevEvent -> Handle -> IO ()
@@ -212,7 +217,6 @@ clientConnection channel handle = do
     Nothing -> do
       Brick.BChan.writeBChan channel $ MRE "Server closed."
 
-
 -- Server code
 
 server :: String -> IO ()
@@ -224,9 +228,9 @@ server name = do
   -- start accepting connections in a new thread
   channel <- newChan -- message channel shared by the messageSender and each client thread
   handlesMV <- newMVar [] -- share variable to hold the different handles for each of the clients
-  forkIO $ accepter sock channel handlesMV
+  _ <- forkIO $ accepter sock channel handlesMV
   -- start the message listener
-  forkIO $ messageListener channel handlesMV
+  _ <- forkIO $ messageListener channel handlesMV
   -- create the client socket
   (SockAddrInet port _) <- getSocketName sock
   clientSock <- socket AF_INET Stream 0
@@ -235,55 +239,96 @@ server name = do
   let initialState = buildState name handle
   -- start client connection manager thread
   eventChannel <- Brick.BChan.newBChan 5
-  Brick.BChan.writeBChan eventChannel $ MRE $ "Server opened on port " ++ show port ++ ".\n"
-  forkIO $ clientConnection eventChannel handle
+  Brick.BChan.writeBChan eventChannel $ MRE $ "Server opened on port " ++ show port ++ "."
+  Brick.BChan.writeBChan eventChannel $ MRE $ "Use ':con' to see current connections."
+  hPutStrLn handle $ name ++ " joined."
+  _ <- forkIO $ clientConnection eventChannel handle
   -- start the client
   let buildVty = Graphics.Vty.CrossPlatform.mkVty Graphics.Vty.Config.defaultConfig
   initialVty <- buildVty
   void $ M.customMain initialVty buildVty (Just eventChannel) app initialState
 
-handleCleanUp :: [Handle] -> IO [Handle]
-handleCleanUp ls = filterM hIsOpen ls
-
-accepter :: Socket -> Chan String -> MVar [Handle] -> IO ()
+accepter :: Socket -> Chan String -> MVar [(Handle, String)] -> IO ()
 accepter sock channel handlesMV = do
   (clientSock, clientSockAddr) <- accept sock
   newHandle <- socketToHandle clientSock ReadWriteMode
   hSetBuffering newHandle NoBuffering
-  oldHandles <- takeMVar handlesMV
-  putMVar handlesMV $ (newHandle : oldHandles)
-  forkIO $ clientThread newHandle channel
-  accepter sock channel handlesMV
+  -- read the first message from the client (containing the name)
+  result <- catch (fmap Just $ hGetLine newHandle) (\(_ :: SomeException) -> return Nothing)
+  -- check the result
 
-sendToHandles :: String -> [Handle] -> IO ()
-sendToHandles message [] = do
-  return ()
-sendToHandles message (h:t) = do
-  restult <- catch (fmap Just $ hPutStrLn h message) (\(_ :: SomeException) -> return Nothing)
-  sendToHandles message t
-
-messageListener :: Chan String -> MVar [Handle] -> IO ()
-messageListener channel handlesMV = do
-  message <- readChan channel
-  handles <- readMVar handlesMV
-  sendToHandles message $ handles
-  messageListener channel handlesMV
-
-clientThread :: Handle -> Chan String -> IO ()
-clientThread handle channel = do
-  result <- catch (fmap Just $ hGetLine handle) (\(_ :: SomeException) -> return Nothing)
   case result of
     Just msg -> do
       writeChan channel msg
-      clientThread handle channel
+      let name = reverse $ drop 8 $ reverse msg -- take just the name
+      -- modify the MVar
+      oldHandles <- takeMVar handlesMV
+      putMVar handlesMV $ ((newHandle, name) : oldHandles) 
+      -- create a new thread for managing the connection with the client
+      _ <- forkIO $ clientThread newHandle channel handlesMV
+      -- continue accepting connections
+      accepter sock channel handlesMV
+    Nothing -> do -- if the client suddenly closes the connetion, just contiune accepting connections
+      accepter sock channel handlesMV
+  
+
+sendToHandles :: String -> [(Handle, String)] -> IO [Maybe ()]
+sendToHandles message handles = mapM sendAndCatch $ map (\(h, _) -> h) handles
+  where
+    sendAndCatch :: Handle -> IO (Maybe ())
+    sendAndCatch handle = catch (sendMessage handle >> return (Just ())) (\(_ :: SomeException) -> return Nothing)
+
+    sendMessage :: Handle -> IO ()
+    sendMessage handle = hPutStrLn handle message
+
+messageListener :: Chan String -> MVar [(Handle, String)] -> IO ()
+messageListener channel handlesMV = do
+  message <- readChan channel
+  handles <- takeMVar handlesMV -- take out the handles and names
+  answers <- sendToHandles message $ handles -- send message and validate handles
+  let validHandles = filterHandles handles answers -- select valid handles based on answers
+  putMVar handlesMV validHandles -- put back the valid handles
+  -- let invalidHandles = [x | x <- handles , notElem x validHandles] -- extract the invalidated handles
+  -- let noConn = length validHandles
+  -- writeDisconnectNotice noConn invalidHandles -- add disconnected notice to message queue
+  messageListener channel handlesMV -- start listening for messages again
+    where
+      filterHandles :: [(Handle, String)] -> [Maybe ()] -> [(Handle, String)]
+      filterHandles handles res = map (\(x, _) -> x) $ filter (\(_, y) -> y /= Nothing) $ zip handles res
+      writeDisconnectNotice :: Int -> [(Handle, String)] -> IO [()]
+      writeDisconnectNotice noConn l = mapM (\(_, y) -> writeChan channel $ y ++ "'s connection has been removed from the memory (" ++ show noConn ++ " remaining).") l
+
+clientThread :: Handle -> Chan String -> MVar [(Handle, String)] -> IO ()
+clientThread handle channel handlesMV = do
+  result <- catch (fmap Just $ hGetLine handle) (\(_ :: SomeException) -> return Nothing)
+  case result of
+    Just msg -> do
+      if isCon msg then
+        do 
+          conStr <- formatCon handlesMV
+          _ <- catch (fmap Just $ hPutStrLn handle conStr) (\(_ :: SomeException) -> return Nothing)
+          clientThread handle channel handlesMV
+      else do
+        writeChan channel msg
+        clientThread handle channel handlesMV
     Nothing -> do
       return ()
+  where 
+    isCon :: String -> Bool
+    isCon (a:b:c:d:s)
+      |a:b:c:d:"" == ":con" = True
+      |otherwise = isCon $ b:c:d:s
+    isCon _ = False
+    formatCon :: MVar [(Handle, String)] -> IO String
+    formatCon mv = do
+      handles <- readMVar mv
+      let names = map (\(_, s) -> s) handles
+      return $ "Currently connected: " ++ (foldl (\x y -> x ++ ", " ++ y) (names !! 0) $ drop 1 names) ++ "."
 
 -- Main
 
 main :: IO ()
 main = do
-  -- void $ M.defaultMain app initialState
   name <- getName
   input <- getOption
   if input == "h" then

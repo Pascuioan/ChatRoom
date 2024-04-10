@@ -54,7 +54,9 @@ common warnings
     ghc-options: 
         -Wall
         -threaded
-        -XScopedTypeVariables
+        -fno-warn-name-shadowing
+        -fno-warn-unused-binds
+        -- -XScopedTypeVariables
         
 executable ChatRoom
     -- Import common warning flags.
@@ -81,6 +83,9 @@ executable ChatRoom
                       word-wrap,
                       network,
                       vty-crossplatform
+
+    default-extensions:
+      ScopedTypeVariables
 
     -- Directories containing source files.
     hs-source-dirs:   app
