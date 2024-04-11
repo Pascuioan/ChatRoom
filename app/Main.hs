@@ -202,7 +202,7 @@ client name = do
   let initialState = buildState name handle
   -- create a thread for comunicating with the server
   eventChannel <- Brick.BChan.newBChan 5
-  Brick.BChan.writeBChan eventChannel $ MRE $ "Use ':con' to see current connections."
+  Brick.BChan.writeBChan eventChannel $ MRE $ "Use ':con' to see current connections; use Ctrl-Up/Down to scroll."
   _ <- forkIO $ clientConnection eventChannel handle
   -- start the client interface
   let buildVty = Graphics.Vty.CrossPlatform.mkVty Graphics.Vty.Config.defaultConfig
