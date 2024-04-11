@@ -56,7 +56,7 @@ common warnings
         -threaded
         -fno-warn-name-shadowing
         -fno-warn-unused-binds
-        -- -XScopedTypeVariables
+        -fno-warn-type-defaults
         
 executable ChatRoom
     -- Import common warning flags.

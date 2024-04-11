@@ -122,10 +122,13 @@ stripEndingSpaces :: String -> String
 stripEndingSpaces = reverse . stripLeadingSpaces . reverse
 
 stringToInt :: String -> Int
-stringToInt s = sum [x * (round (10**(fromIntegral y - 1))) | (x, y) <- zip (fmap digitToInt s) (reverse [1..(length s)])]
+stringToInt s = sum [x * (round (10**(fromIntegral y - 1)) :: Int) | (x, y) <- zip (fmap digitToInt s) (reverse [1..(length s)])]
 
 tuplify :: [a] -> (a,a,a,a)
 tuplify [a,b,c,d] = (a,b,c,d)
+tuplify _ = error "This error will never be thrown; it will forever live as a shadow of what it could have become. \
+                  \Perhaps the non-exhastive patterns gods intended for the error's greatest possesion to be the hope\
+                  \it holds that one day it shall make itself useful by helping the programmer write better code."
 
 intTupleToWord8Tuple :: (Int, Int, Int, Int) -> (Word8, Word8, Word8, Word8)
 intTupleToWord8Tuple (a, b, c, d) = (fromIntegral a, fromIntegral b, fromIntegral c, fromIntegral d)
@@ -135,7 +138,7 @@ allInRange l = foldr (&&) True $ fmap (\x -> (x >= 0) && (x <= 255)) l
 
 parseIp :: String -> Maybe (Int, Int, Int, Int)
 parseIp s
-  |(length l == 4) && allInRange l = Just $ tuplify $ l
+  |(length l == 4) && allInRange l = Just $ tuplify l
   |otherwise = Nothing
   where l = map stringToInt $ filter (\x -> x /= "") $ split '.' $ filter (\x -> isDigit x || x == '.') s
 
@@ -200,7 +203,7 @@ client name = do
   -- create a thread for comunicating with the server
   eventChannel <- Brick.BChan.newBChan 5
   Brick.BChan.writeBChan eventChannel $ MRE $ "Use ':con' to see current connections."
-  forkIO $ clientConnection eventChannel handle
+  _ <- forkIO $ clientConnection eventChannel handle
   -- start the client interface
   let buildVty = Graphics.Vty.CrossPlatform.mkVty Graphics.Vty.Config.defaultConfig
   initialVty <- buildVty
@@ -250,7 +253,7 @@ server name = do
 
 accepter :: Socket -> Chan String -> MVar [(Handle, String)] -> IO ()
 accepter sock channel handlesMV = do
-  (clientSock, clientSockAddr) <- accept sock
+  (clientSock, _) <- accept sock
   newHandle <- socketToHandle clientSock ReadWriteMode
   hSetBuffering newHandle NoBuffering
   -- read the first message from the client (containing the name)
@@ -296,7 +299,7 @@ messageListener channel handlesMV = do
       filterHandles :: [(Handle, String)] -> [Maybe ()] -> [(Handle, String)]
       filterHandles handles res = map (\(x, _) -> x) $ filter (\(_, y) -> y /= Nothing) $ zip handles res
       writeDisconnectNotice :: Int -> [(Handle, String)] -> IO [()]
-      writeDisconnectNotice noConn l = mapM (\(_, y) -> writeChan channel $ y ++ "'s connection has been removed from the memory (" ++ show noConn ++ " remaining).") l
+      writeDisconnectNotice noConn l = mapM (\(x, y) -> hClose x >> (writeChan channel $ y ++ "'s connection has been removed from the memory (" ++ show noConn ++ " remaining).")) l
 
 clientThread :: Handle -> Chan String -> MVar [(Handle, String)] -> IO ()
 clientThread handle channel handlesMV = do
